@@ -216,4 +216,18 @@ class HubRelayTest {
         assertTrue(impostor.status.value is ClientStatus.Disconnected)
         assertEquals(1, hubRepo.peers.value.size)
     }
+
+    @Test
+    fun disallowedConnectionNeverJoins() = runBlocking {
+        val strictHub = HubServer("Hub", hubRepo, scope, allowConnection = { false })
+        try {
+            val port = strictHub.start()
+            val outsider = ClientConnection("a", "Outsider", ChatRepository().apply { reset("a") }, scope)
+            outsider.connect(InetAddress.getLoopbackAddress(), port, "Hub")
+            assertTrue(outsider.status.value is ClientStatus.Disconnected)
+            assertEquals(0, hubRepo.peers.value.size)
+        } finally {
+            strictHub.stop()
+        }
+    }
 }

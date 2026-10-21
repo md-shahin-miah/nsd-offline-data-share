@@ -2,6 +2,7 @@ package com.valt.offlinensdshare.ui
 
 import android.app.Application
 import android.net.nsd.NsdServiceInfo
+import android.os.Build
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.valt.offlinensdshare.data.ChatRepository
@@ -10,9 +11,12 @@ import com.valt.offlinensdshare.data.Role
 import com.valt.offlinensdshare.net.ClientConnection
 import com.valt.offlinensdshare.net.ClientStatus
 import com.valt.offlinensdshare.net.HubServer
+import com.valt.offlinensdshare.nsd.LocalNetworkWatcher
 import com.valt.offlinensdshare.nsd.MulticastLockHolder
 import com.valt.offlinensdshare.nsd.NsdAdvertiser
 import com.valt.offlinensdshare.nsd.NsdDiscovery
+import com.valt.offlinensdshare.nsd.findLocalNetwork
+import com.valt.offlinensdshare.nsd.isMobileDataAddress
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -47,6 +51,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val advertiser = NsdAdvertiser(application)
     private val discovery = NsdDiscovery(application)
     private val multicastLock = MulticastLockHolder(application)
+    // NSD doesn't always notice a Wi-Fi/LAN that comes up mid-session, which used to need an app restart.
+    private val networkWatcher = LocalNetworkWatcher(application) {
+        viewModelScope.launch { onNewLocalNetwork() }
+    }
 
     var role: Role? = null
         private set
@@ -72,9 +80,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         myName = name
         repository.reset(HUB_ID)
         multicastLock.acquire()
+        networkWatcher.start()
         _hubStatus.value = HubStatus.Starting
         hubStartJob = viewModelScope.launch {
-            val server = HubServer(name, repository, viewModelScope)
+            // Clients must come from the same Wi-Fi, LAN or hotspot, never over mobile data.
+            val server = HubServer(name, repository, viewModelScope) { socket ->
+                !isMobileDataAddress(getApplication(), socket.localAddress)
+            }
             val port = try {
                 server.start()
             } catch (e: CancellationException) {
@@ -85,12 +97,30 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             hubServer = server
-            advertiser.register(
-                name = name,
-                port = port,
-                onRegistered = { serviceName -> _hubStatus.value = HubStatus.Advertising(serviceName, port) },
-                onFailed = { code -> _hubStatus.value = HubStatus.Error("Could not advertise hub (error $code)") },
-            )
+            advertise(name, port)
+        }
+    }
+
+    private fun advertise(name: String, port: Int) {
+        advertiser.register(
+            name = name,
+            port = port,
+            onRegistered = { serviceName -> _hubStatus.value = HubStatus.Advertising(serviceName, port) },
+            onFailed = { code -> _hubStatus.value = HubStatus.Error("Could not advertise hub (error $code)") },
+        )
+    }
+
+    private fun onNewLocalNetwork() {
+        when (role) {
+            Role.CLIENT -> restartDiscovery()
+            Role.HUB -> {
+                // Android 14+ advertises on new networks by itself; older versions may not.
+                val advertising = _hubStatus.value as? HubStatus.Advertising
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE && advertising != null) {
+                    advertise(myName, advertising.port)
+                }
+            }
+            null -> Unit
         }
     }
 
@@ -103,6 +133,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         client.value = ClientConnection(myId, name, repository, viewModelScope)
         multicastLock.acquire()
         discovery.start()
+        networkWatcher.start()
     }
 
     fun restartDiscovery() {
@@ -116,7 +147,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val resolved = discovery.resolve(hub)
-                connection.connect(resolved.host, resolved.port, hub.serviceName)
+                // Only ever connect through the hub's Wi-Fi/LAN, even if it has no internet and
+                // the phone would otherwise send the connection over mobile data.
+                val network = findLocalNetwork(getApplication(), resolved.host)
+                if (network == null) {
+                    connection.fail("Not on the hub's network. Join the same Wi-Fi or hotspot as the hub.")
+                    return@launch
+                }
+                connection.connect(resolved.host, resolved.port, hub.serviceName, network.socketFactory)
             } catch (e: IOException) {
                 connection.fail(e.message ?: "Could not find hub")
             }
@@ -149,6 +187,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val connection = client.value
         client.value = null
         discovery.stop()
+        networkWatcher.stop()
         multicastLock.release()
         // Closing sockets doesn't block, so this is safe on the main thread and finishes before
         // a new session resets the repository.

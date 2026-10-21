@@ -19,11 +19,15 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * TCP server run by the hub. It accepts every client automatically and relays chat messages,
  * so clients only ever need the hub's address to reach each other.
+ *
+ * [allowConnection] can turn away a connection before it is read, e.g. one that arrived over
+ * mobile data instead of the local network.
  */
 class HubServer(
     private val hubName: String,
     private val repository: ChatRepository,
     private val scope: CoroutineScope,
+    private val allowConnection: (Socket) -> Boolean = { true },
 ) {
 
     private class ClientSession(val peer: Peer, val connection: Connection)
@@ -81,6 +85,13 @@ class HubServer(
                 server.accept()
             } catch (e: IOException) {
                 break // server socket closed by stop()
+            }
+            if (!allowConnection(socket)) {
+                try {
+                    socket.close()
+                } catch (_: IOException) {
+                }
+                continue
             }
             // Auto-accept: every incoming connection gets its own session without asking the user.
             launch { handleClient(socket) }

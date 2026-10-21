@@ -130,7 +130,11 @@ Example:
 
 ## 7. Requirements and troubleshooting
 
-- All devices must be on the **same Wi-Fi network or the same phone hotspot**. Internet is not needed.
+- All devices must be on the **same Wi-Fi network, wired LAN or phone hotspot**. Internet is not needed.
+- The app **never uses mobile data**, so mobile data can stay on:
+  - A client always connects through Wi-Fi or Ethernet. This holds even when that network has no internet and Android would otherwise send the connection over mobile data.
+  - The hub refuses any connection that arrives over mobile data.
+- If Connect says **"Not on the hub's network"**, the phone isn't on the hub's Wi-Fi, LAN or hotspot. Join it and try again.
 - If no hub shows up:
   - Check the router doesn't have **AP / client isolation** turned on. That setting blocks phones from seeing each other.
   - Tap **Refresh** on the hub list.
@@ -144,6 +148,7 @@ Example:
 | Part | File |
 |---|---|
 | Announce / discover / resolve | `nsd/NsdAdvertiser.kt`, `nsd/NsdDiscovery.kt` |
+| Wi-Fi / LAN only, never mobile data | `nsd/LocalNetwork.kt` |
 | Hub server, auto-accept, routing | `net/HubServer.kt` |
 | Client connection | `net/ClientConnection.kt` |
 | Message format | `net/Protocol.kt` |

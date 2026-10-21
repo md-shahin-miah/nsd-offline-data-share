@@ -14,8 +14,8 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.net.InetAddress
 import java.net.InetSocketAddress
-import java.net.Socket
 import java.util.UUID
+import javax.net.SocketFactory
 
 sealed interface ClientStatus {
     data object Idle : ClientStatus
@@ -51,12 +51,18 @@ class ClientConnection(
         _status.value = ClientStatus.Disconnected(reason)
     }
 
-    suspend fun connect(host: InetAddress, port: Int, hubName: String) {
+    /** [socketFactory] picks the network to connect over; pass one bound to the hub's LAN. */
+    suspend fun connect(
+        host: InetAddress,
+        port: Int,
+        hubName: String,
+        socketFactory: SocketFactory = SocketFactory.getDefault(),
+    ) {
         disconnect()
         _status.value = ClientStatus.Connecting(hubName)
         val result = withContext(Dispatchers.IO) {
             try {
-                val socket = Socket()
+                val socket = socketFactory.createSocket()
                 socket.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
                 val conn = Connection(socket)
                 conn.send(Message.Hello(myId, myName))

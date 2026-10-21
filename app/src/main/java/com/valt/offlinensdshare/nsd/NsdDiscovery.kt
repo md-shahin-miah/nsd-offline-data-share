@@ -8,10 +8,12 @@ import androidx.annotation.RequiresApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeout
 import java.io.IOException
 import java.net.Inet4Address
 import java.net.InetAddress
@@ -35,6 +37,13 @@ class NsdDiscovery(private val context: Context) {
 
     /** Before API 34 NsdManager can resolve only one service at a time. */
     private val legacyResolveLock = Mutex()
+
+    /**
+     * Before API 34 a resolve can't be cancelled, and one that never answers makes its NsdManager
+     * refuse every later resolve until the app restarts. After a timeout, resolves move to a fresh one.
+     */
+    @Volatile
+    private var legacyResolver: NsdManager = nsdManager
 
     fun start() {
         if (listener != null) return
@@ -78,12 +87,23 @@ class NsdDiscovery(private val context: Context) {
         }
     }
 
-    suspend fun resolve(info: NsdServiceInfo): ResolvedService =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            resolveWithCallback(info)
-        } else {
-            resolveLegacy(info)
+    /** Fails after [RESOLVE_TIMEOUT_MS] instead of waiting forever if the hub never answers. */
+    suspend fun resolve(info: NsdServiceInfo): ResolvedService {
+        val legacy = Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE
+        return try {
+            withTimeout(RESOLVE_TIMEOUT_MS) {
+                if (legacy) resolveLegacy(info) else resolveWithCallback(info)
+            }
+        } catch (e: TimeoutCancellationException) {
+            if (legacy) legacyResolver = freshNsdManager()
+            throw IOException("Hub did not answer. Tap Refresh and try again.")
         }
+    }
+
+    /** The system tracks pending resolves per NsdManager, and each context creates its own. */
+    private fun freshNsdManager(): NsdManager =
+        context.createConfigurationContext(context.resources.configuration)
+            .getSystemService(NsdManager::class.java)
 
     @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     private suspend fun resolveWithCallback(info: NsdServiceInfo): ResolvedService {
@@ -126,7 +146,7 @@ class NsdDiscovery(private val context: Context) {
     @Suppress("DEPRECATION")
     private suspend fun resolveLegacy(info: NsdServiceInfo): ResolvedService = legacyResolveLock.withLock {
         suspendCancellableCoroutine { cont ->
-            nsdManager.resolveService(info, object : NsdManager.ResolveListener {
+            legacyResolver.resolveService(info, object : NsdManager.ResolveListener {
                 override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                     if (cont.isActive) cont.resumeWithException(IOException("Resolve failed (error $errorCode)"))
                 }
@@ -136,5 +156,9 @@ class NsdDiscovery(private val context: Context) {
                 }
             })
         }
+    }
+
+    private companion object {
+        const val RESOLVE_TIMEOUT_MS = 10_000L
     }
 }
